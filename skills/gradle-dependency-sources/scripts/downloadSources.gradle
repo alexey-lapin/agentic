@@ -1,0 +1,98 @@
+// downloadSources.gradle
+// Gradle init script for downloading and extracting dependency source JARs.
+//
+// Usage:
+//   ./gradlew --init-script downloadSources.gradle -q downloadSourceJar \
+//     -Pdep.notation=org.springframework:spring-jdbc:7.0.2 \
+//     -Pdep.target.dir=/path/to/extract/dir
+//
+// The script:
+//   1. Creates a detached configuration (no side effects on the project build)
+//   2. Adds the dependency with :sources classifier
+//   3. Resolves (downloads) the sources JAR
+//   4. Extracts the JAR contents to the target directory
+//   5. Outputs SOURCES_EXTRACTED:<path> on success
+
+allprojects {
+    tasks.register('downloadSourceJar') {
+        doLast {
+            def notation = project.findProperty('dep.notation')
+            def targetDir = project.findProperty('dep.target.dir')
+
+            if (!notation) {
+                throw new GradleException(
+                    "Missing required property 'dep.notation'. " +
+                    "Pass it as -Pdep.notation=group:artifact:version"
+                )
+            }
+            if (!targetDir) {
+                throw new GradleException(
+                    "Missing required property 'dep.target.dir'. " +
+                    "Pass it as -Pdep.target.dir=/path/to/target"
+                )
+            }
+
+            // Append :sources classifier if not already present
+            def parts = notation.split(':')
+            def sourcesNotation
+            if (parts.length == 3) {
+                // group:artifact:version -> group:artifact:version:sources
+                sourcesNotation = "${notation}:sources"
+            } else if (parts.length == 4 && parts[3] == 'sources') {
+                // Already has :sources classifier
+                sourcesNotation = notation
+            } else if (parts.length == 4) {
+                // Has a different classifier, override to sources
+                sourcesNotation = "${parts[0]}:${parts[1]}:${parts[2]}:sources"
+            } else {
+                throw new GradleException(
+                    "Invalid dependency notation '${notation}'. " +
+                    "Expected format: group:artifact:version"
+                )
+            }
+
+            logger.lifecycle("Resolving sources for: ${sourcesNotation}")
+
+            // Create a detached configuration - does not pollute the project's build
+            def cfg = configurations.detachedConfiguration(
+                dependencies.create(sourcesNotation)
+            )
+            cfg.transitive = false
+
+            // Resolve the dependency (downloads the sources JAR)
+            def resolvedFiles
+            try {
+                resolvedFiles = cfg.resolve()
+            } catch (Exception e) {
+                logger.lifecycle("SOURCES_NOT_FOUND:${notation}")
+                logger.lifecycle("Failed to resolve sources JAR: ${e.message}")
+                throw new GradleException(
+                    "Could not resolve sources for '${sourcesNotation}'. " +
+                    "The artifact may not publish a sources JAR.", e
+                )
+            }
+
+            if (resolvedFiles.isEmpty()) {
+                logger.lifecycle("SOURCES_NOT_FOUND:${notation}")
+                throw new GradleException(
+                    "No sources JAR found for '${sourcesNotation}'. " +
+                    "The artifact may not publish a sources JAR."
+                )
+            }
+
+            def sourceJar = resolvedFiles.first()
+            logger.lifecycle("Downloaded sources JAR: ${sourceJar}")
+
+            // Extract the JAR to the target directory
+            def target = file(targetDir)
+            target.mkdirs()
+
+            copy {
+                from zipTree(sourceJar)
+                into target
+            }
+
+            logger.lifecycle("SOURCES_EXTRACTED:${target.absolutePath}")
+        }
+    }
+}
