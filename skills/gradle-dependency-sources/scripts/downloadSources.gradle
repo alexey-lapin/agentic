@@ -2,7 +2,8 @@
 // Gradle init script for downloading and extracting dependency source JARs.
 //
 // Usage:
-//   ./gradlew --init-script downloadSources.gradle -q downloadSourceJar \
+//   ./gradlew --init-script /path/to/downloadSources.gradle \
+//     --console plain --warning-mode none --no-problems-report :downloadSourceJar \
 //     -Pdep.notation=org.springframework:spring-jdbc:7.0.2 \
 //     -Pdep.target.dir=/path/to/extract/dir
 //
@@ -11,10 +12,10 @@
 //   2. Adds the dependency with :sources classifier
 //   3. Resolves (downloads) the sources JAR
 //   4. Extracts the JAR contents to the target directory
-//   5. Outputs SOURCES_EXTRACTED:<path> on success
+//   5. Outputs SOURCES_EXTRACTED:<path> and discovered package names on success
 
-allprojects {
-    tasks.register('downloadSourceJar') {
+gradle.projectsLoaded {
+    gradle.rootProject.tasks.register('downloadSourceJar') {
         doLast {
             def notation = project.findProperty('dep.notation')
             def targetDir = project.findProperty('dep.target.dir')
@@ -43,6 +44,7 @@ allprojects {
                 sourcesNotation = notation
             } else if (parts.length == 4) {
                 // Has a different classifier, override to sources
+                logger.warn("Overriding classifier '${parts[3]}' with 'sources'")
                 sourcesNotation = "${parts[0]}:${parts[1]}:${parts[2]}:sources"
             } else {
                 throw new GradleException(
@@ -54,8 +56,8 @@ allprojects {
             logger.lifecycle("Resolving sources for: ${sourcesNotation}")
 
             // Create a detached configuration - does not pollute the project's build
-            def cfg = configurations.detachedConfiguration(
-                dependencies.create(sourcesNotation)
+            def cfg = project.configurations.detachedConfiguration(
+                project.dependencies.create(sourcesNotation)
             )
             cfg.transitive = false
 
@@ -84,15 +86,64 @@ allprojects {
             logger.lifecycle("Downloaded sources JAR: ${sourceJar}")
 
             // Extract the JAR to the target directory
-            def target = file(targetDir)
+            def target = project.file(targetDir)
             target.mkdirs()
 
-            copy {
-                from zipTree(sourceJar)
+            project.copy {
+                from project.zipTree(sourceJar)
                 into target
             }
 
+            // Collect declared Java/Kotlin package names from extracted sources
+            def packages = new TreeSet<String>()
+            def packagePattern = ~/^\s*package\s+([A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)*)\b/
+            target.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+                if (f.name.endsWith('.java') || f.name.endsWith('.kt')) {
+                    try {
+                        String pkg = null
+                        f.withReader('UTF-8') { reader ->
+                            String line
+                            int linesScanned = 0
+                            while ((line = reader.readLine()) != null && linesScanned < 200) {
+                                linesScanned++
+                                def matcher = (line =~ packagePattern)
+                                if (matcher.find()) {
+                                    pkg = matcher.group(1)
+                                    break
+                                }
+                            }
+                        }
+                        if (pkg) {
+                            packages.add(pkg)
+                        }
+                    } catch (Exception e) {
+                        logger.debug("Skipping unreadable file ${f}: ${e.message}")
+                    }
+                }
+            }
+
+            // Verify that extraction produced usable source files
+            def hasSourceFiles = false
+            target.eachFileRecurse(groovy.io.FileType.FILES) { f ->
+                if (f.name.endsWith('.java') || f.name.endsWith('.kt')) {
+                    hasSourceFiles = true
+                }
+            }
+
+            if (!hasSourceFiles) {
+                logger.lifecycle("SOURCES_EMPTY:${target.absolutePath}")
+                logger.lifecycle(
+                    "The sources JAR was extracted but contains no .java or .kt files. " +
+                    "The JAR may only contain metadata (e.g. META-INF)."
+                )
+                return
+            }
+
             logger.lifecycle("SOURCES_EXTRACTED:${target.absolutePath}")
+            if (packages) {
+                logger.lifecycle("PACKAGES:")
+                packages.each { pkg -> logger.lifecycle("  ${pkg}") }
+            }
         }
     }
 }
