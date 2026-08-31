@@ -5,9 +5,9 @@ description: Plan and run a promotion campaign for a GitHub repo. Use when the u
 
 # Repo promotion
 
-Plan first. Execute after the user confirms. Writing `.promotion-plan.md` and its
-`.gitignore` line is the one exception, because the plan has to live somewhere before it
-can be shown.
+Plan first. Execute after the user confirms. Planning writes only `.promotion/`, which is
+excluded locally rather than through `.gitignore`, so no tracked file changes before the
+user has seen the plan.
 
 Three kinds of work carry a repo: **substance** makes it worth starring, **conversion**
 turns a visitor on the page into a star, **distribution** brings the visitor. Conversion
@@ -51,7 +51,7 @@ value rather than an error, and the mode is stated to the user in one line.
 
 ## Step 2: load state
 
-Read `.promotion-plan.md` beside the repo root if it exists.
+Read `.promotion/plan.md` if it exists.
 
 `## Constraints` is user-owned and binding. Drop any plan item that violates it.
 
@@ -254,8 +254,17 @@ Write `## Message` before the tables: who the target reader is, the problem they
 one claim this repo makes to them, and the evidence for it. Every draft and every channel
 pitch says the same thing, and this is where that thing is decided.
 
-Write the whole thing to `.promotion-plan.md` in the repo root using the schema below, and
-add the file and `promotion-drafts/` to `.gitignore` if they are not already there.
+Write the whole thing to `.promotion/plan.md` using the schema below. Everything this
+skill produces lives under that one directory, so exclude it once, locally:
+
+```
+git rev-parse --git-path info/exclude   # resolves correctly in worktrees and submodules
+```
+
+Append `.promotion/` to that file if it is not already there. Local exclude keeps the
+repo's own `.gitignore` untouched, which matters because `.gitignore` is tracked and
+planning has not been approved yet. Offer `.gitignore` instead only if the user wants the
+plan committed and shared.
 
 Done when: every substance and distribution item carries effort, payoff, and confidence;
 every distribution item names a specific target and a metric to judge it by; every phase
@@ -280,7 +289,7 @@ was touched and leave the commit to the user.
 Anything that leaves the repo gets confirmed on its own, every time, including
 awesome-list PRs opened through `gh` under the user's account.
 
-Posts for aggregators, forums, and social go to `promotion-drafts/<channel>.md`, one file
+Posts for aggregators, forums, and social go to `.promotion/drafts/<channel>.md`, one file
 per post, each carrying the target, the rules that apply, and the body. Write every draft
 in first person as the repo author, and apply the `unslop` skill before showing it. A post
 that reads as generated gets called out, and that becomes the thread.
@@ -291,7 +300,7 @@ where there is one, and what the target's response was.
 
 ## Plan file schema
 
-`.promotion-plan.md`, gitignored, in the repo root.
+`.promotion/plan.md`, excluded through `.git/info/exclude`.
 
 ```markdown
 ## Constraints
@@ -336,7 +345,7 @@ Phases are listed above the tables, each with its exit condition.
 
 ## Drafts
 
-Links to files under promotion-drafts/.
+Links to files under .promotion/drafts/.
 
 ## Log
 
