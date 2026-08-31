@@ -216,8 +216,10 @@ reframing proposal instead: what this repo would have to become, or what to extr
 it, to be worth promoting. Skip `## Distribution` entirely and go to step 10.
 
 Otherwise, three sections. Substance and distribution items carry effort, expected payoff,
-and a confidence mark. Audit items carry their score and fix from step 6 and take their
-phase from the dependency rule below.
+and a confidence mark. Audit items carry their score and fix from step 6, an effort
+estimate, and their phase from the dependency rule below. They take no payoff or
+confidence, because a conversion fix is gating rather than ranked, but their effort counts
+toward the budget like any other work.
 
 - `## Substance`: product work that makes the repo more worth starring. Extracting a
   reusable piece, the one capability no comparable has, a template repo, a genuinely novel
@@ -231,7 +233,8 @@ Effort is S=1, M=3, L=8, in hours. Payoff is High=8, Med=3, Low=1. Order by payo
 by effort. The numbers are a tie-breaker for judgment, not a replacement for it, but they
 make the ordering something the user can argue with.
 
-Then check the plan against the intake budget. Sum the effort hours per phase and divide
+Then check the plan against the intake budget. Sum the effort hours per phase, audit rows
+included, and divide
 by the weekly hours from intake question 1. A phase that runs past a few months at that
 rate is too big, so cut its lowest-ratio items until it fits and say what was cut. A
 budget collected and then ignored produces a plan the user silently abandons.
@@ -335,7 +338,7 @@ verdict.
 
 ## Audit
 
-| Item | Score | Fix | Phase | Status |
+| Item | Score | Fix | Effort | Phase | Status |
 
 ## Distribution
 
