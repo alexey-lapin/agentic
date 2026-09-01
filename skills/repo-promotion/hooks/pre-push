@@ -1,0 +1,12 @@
+#!/bin/sh
+# Refuse to publish the promotion branch: it holds private planning notes and
+# origin is public. Deliberate publication: git push --no-verify <remote> promotion
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [ "$local_ref" = "refs/heads/promotion" ]; then
+        echo "pre-push: refusing to push refs/heads/promotion." >&2
+        echo "  It holds private planning notes and this remote is public." >&2
+        echo "  Override deliberately with: git push --no-verify <remote> promotion" >&2
+        exit 1
+    fi
+done
+exit 0

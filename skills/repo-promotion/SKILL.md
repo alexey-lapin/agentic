@@ -5,9 +5,8 @@ description: Plan and run a promotion campaign for a GitHub repo. Use when the u
 
 # Repo promotion
 
-Plan first. Execute after the user confirms. Planning writes only `.promotion/`, which is
-excluded locally rather than through `.gitignore`, so no tracked file changes before the
-user has seen the plan.
+Plan first. Execute after the user confirms. Planning writes only `.promotion/`, which the
+repo excludes, so no tracked file changes before the user has seen the plan.
 
 Three kinds of work carry a repo: **substance** makes it worth starring, **conversion**
 turns a visitor on the page into a star, **distribution** brings the visitor. Conversion
@@ -257,17 +256,8 @@ Write `## Message` before the tables: who the target reader is, the problem they
 one claim this repo makes to them, and the evidence for it. Every draft and every channel
 pitch says the same thing, and this is where that thing is decided.
 
-Write the whole thing to `.promotion/plan.md` using the schema below. Everything this
-skill produces lives under that one directory, so exclude it once, locally:
-
-```
-git rev-parse --git-path info/exclude   # resolves correctly in worktrees and submodules
-```
-
-Append `.promotion/` to that file if it is not already there. Local exclude keeps the
-repo's own `.gitignore` untouched, which matters because `.gitignore` is tracked and
-planning has not been approved yet. Offer `.gitignore` instead only if the user wants the
-plan committed and shared.
+Write the whole thing to `.promotion/plan.md` using the schema in [`STATE.md`](STATE.md),
+which also covers where that directory lives and how its history is kept.
 
 Done when: every substance and distribution item carries effort, payoff, and confidence;
 every distribution item names a specific target and a metric to judge it by; every phase
@@ -297,63 +287,14 @@ per post, each carrying the target, the rules that apply, and the body. Write ev
 in first person as the repo author, and apply the `unslop` skill before showing it. A post
 that reads as generated gets called out, and that becomes the thread.
 
+Commit the plan when the run ends, per [`STATE.md`](STATE.md). A run that changes the plan
+and leaves it uncommitted loses the one record of what changed and why.
+
 Done when: every item in the approved set is either executed or carries a reason naming
-what blocked it, and `## Log` records for each one the action, the date, the resulting URL
-where there is one, and what the target's response was.
+what blocked it, `## Log` records for each one the action, the date, the resulting URL
+where there is one, and what the target's response was, and the plan is committed.
 
-## Plan file schema
+## Plan file state
 
-`.promotion/plan.md`, excluded through `.git/info/exclude`.
-
-```markdown
-## Constraints
-
-Seeded once from intake question 6, then user-owned. Read it on every later run.
-
-## Repo type
-
-Primary type and reason, secondary or ruled out, and the channel shortlist with a reason
-for every drop.
-
-## Message
-
-Target reader, their problem, the one claim, the evidence.
-
-## Intake
-
-The six answers, dated.
-
-## Baseline
-
-Dated snapshots, appended. Never replaced.
-
-## Ceiling
-
-Band, reasoning naming comparables and why they lead, tier-change condition, low-ceiling
-verdict.
-
-## Substance
-
-| Action | Phase | Effort | Payoff | Confidence | Status |
-
-## Audit
-
-| Item | Score | Fix | Effort | Phase | Status |
-
-## Distribution
-
-| Action | Channel | One-shot | Phase | Effort | Payoff | Confidence | Metric | Status |
-
-Phases are listed above the tables, each with its exit condition.
-
-## Drafts
-
-Links to files under .promotion/drafts/.
-
-## Log
-
-Dated entries: the approved set per run, then per action what ran, the resulting URL, and
-the response.
-```
-
-Everything except `## Constraints` and `## Baseline` is rewritten on each run.
+[`STATE.md`](STATE.md) holds the schema, the directory layout, and the history rules. Read
+it before the first write of a run and before the last.
