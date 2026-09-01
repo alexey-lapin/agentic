@@ -25,6 +25,12 @@ plan so one-shot channels go last.
 - State attribution only where referrer or timing data supports it. Where it does not,
   write "unclear" and say why. Star counts under a few hundred are noisy and a false
   attribution sends the user back to a channel that did nothing.
+- The plan stays out of everything the work produces. Commit messages, PR titles and
+  bodies, issue text, posts, and list submissions carry the technical reason for the
+  change and nothing about the campaign behind it. An audit item number, a ceiling
+  estimate, a note that a repo is being promoted at all: none of that belongs in a public
+  artifact, and every one of those artifacts is permanent. State why the change is right
+  on its own terms, which is a better argument anyway.
 - A **low ceiling** ends the run at substance and conversion. Say so and stop, rather than
   producing a campaign the repo cannot win. Low means the band's upper bound sits under
   twice the current star count, or the repo type has no realistic star path at all.
