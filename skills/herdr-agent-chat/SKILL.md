@@ -11,18 +11,22 @@ The agent that sends the first message is the **leader**. It owns the user's tas
 
 ## Preconditions
 
-Check these first. If any check fails, tell the user which one and stop.
+The leader runs these checks. A follower takes its identity from `HELLO` and runs none of them.
+
+Establish reachability and identity first. If a check fails, tell the user which one and stop. Process inspection with `ps` is optional evidence: if it is unavailable or denied, skip it and ask the user to confirm any identity that stays unresolved.
 
 ```bash
-test "${HERDR_ENV:-}" = 1 && echo "$HERDR_TAB_ID $HERDR_PANE_ID"
-herdr agent list | jq -r --arg t "$HERDR_TAB_ID" --arg p "$HERDR_PANE_ID" \
-  '.result.agents[] | select(.tab_id==$t and .pane_id!=$p) | "\(.pane_id) \(.agent) \(.agent_status) \(.name)"'
+echo "${HERDR_ENV:-unset} ${HERDR_TAB_ID:-unset} ${HERDR_PANE_ID:-unset} $PWD"
+ps -o tty=,command= -p "$PPID"
+herdr agent list | jq -r '.result.agents[] | "\(.pane_id) \(.tab_id) \(.agent) \(.agent_status) \(.cwd) \(.name)"'
 ```
 
-- `HERDR_ENV` is `1`. Without it you are outside Herdr and cannot reach the session.
-- The filter prints exactly one line: the **peer**, given as its pane ID, agent kind, status, and name. If there are no lines or more than one, ask the user which pane to use. Don't guess.
+- **Herdr reachable.** `herdr agent list` succeeds. If it fails with a permission error, see [Sandboxed agents](#sandboxed-agents). `HERDR_ENV` is `1` inside a Herdr pane; if it is unset while the list works, confirm your pane and tab with the user before going on.
+- **Own entry.** One row matches your `HERDR_PANE_ID`, your `HERDR_TAB_ID`, your agent kind, and your working directory. That row is your **candidate identity**. It becomes confirmed once the checks below pass, or once the user confirms it. If no row matches, tell the user which fields disagree and ask for your current pane and tab. Stale env is a common cause, see [Stale Herdr env](#stale-herdr-env).
+- **Shared runner.** A matching row is a consistency check, not proof, because env can describe another live pane. Ask the user to confirm your pane and tab when more than one row has your agent kind and working directory, or when process inspection suggests your tools run in a shared background process. A parent with no controlling terminal is a clue, not proof, and a parent with a terminal doesn't prove the env belongs to this pane. Walk further up the ancestors when a wrapper hides the runner. Codex's `codex app-server` daemon is the known case.
+- **Peer.** Exactly one other row is in your confirmed tab. Its `agent` value is the peer's kind. If there are none or more than one, ask the user which pane to use. Don't guess.
 
-Until the handshake finishes, address the peer by its pane ID, such as `w9:p5`. After that, use the names the leader assigns (see [Naming](#naming)).
+Pick the peer, send `HELLO`, and rename agents only from a confirmed identity. Until the handshake finishes, address the peer by its pane ID, such as `w9:p5`. After that, use the names the leader assigns (see [Naming](#naming)).
 
 ## Envelope
 
@@ -38,7 +42,7 @@ Start every message with an envelope that carries the type, a number, the sender
 
 ## Sending
 
-**Send, then end your turn.** Never use `--wait` on `agent prompt` in a chat. By default, `--wait` holds the sender inside a tool call until the receiver settles. If the receiver replies with the same wait, each agent waits on the other until a timeout fires. A timeout looks like a failed delivery, and a resend then runs the work twice. Your peer's reply arrives as your next user message, so there is no need to sleep, poll, or loop on `agent read`.
+**Send, then end your turn.** Never use `--wait` on `agent prompt` in a chat. `--wait` holds the sender inside a tool call until the receiver settles. If the receiver replies with the same wait, each agent waits on the other until a timeout fires. A timeout looks like a failed delivery, and a resend then runs the work twice. Your peer's reply arrives as your next user message, so there is no need to sleep, poll, or loop on `agent read`.
 
 Pass the body through a quoted heredoc so quotes and backticks reach the peer unchanged:
 
@@ -50,7 +54,7 @@ EOF
 )"
 ```
 
-Write the body as plain prose. Codex opens a popup on `$` (skill suggestions) and `@` (file suggestions), and it reads a line starting with `/` as a slash command. A popup takes the Enter key, so the message sits in the input box unsent. Name an environment variable without its sigil ("your HERDR_PANE_ID env var"), and give paths without a leading `@`.
+Write the body as plain prose. Agent input boxes can treat a leading `/` as a slash command and open suggestion popups on characters such as `$` or `@`. A popup takes the Enter key, so the message sits in the input box unsent. Codex, for example, opens popups on `$` (skills) and `@` (files). Name an environment variable without its sigil ("your HERDR_PANE_ID env var"), give paths without a leading `@`, label paths so each line starts with prose rather than a `/`, and put material that needs literal syntax in a file.
 
 Keep a message to about 20 lines. For longer material, such as diffs, logs, or plans, write a file at an absolute path and send the path.
 
@@ -78,32 +82,35 @@ Reply right away, even when the peer shows `working`. It may still be finishing 
 
 ## Handshake (leader)
 
-A sandboxed peer, such as Codex in its default sandbox, needs the user's approval to reach the Herdr socket. Tell the user this before you send `HELLO` so they watch the peer's pane for approval prompts.
+A sandboxed peer may need the user's approval to reach the Herdr socket; Codex in its default sandbox is one example. If that approval hasn't been granted yet, tell the user before you send `HELLO` so they watch the peer's pane for approval prompts.
 
-The follower might not have this skill installed, so `HELLO` carries the skill's absolute path and enough of the protocol to work without it. Fill in the placeholders and send it:
+The follower might not have this skill installed, so `HELLO` carries the skill's absolute path and enough of the protocol to work without it. Fill in the placeholders, using the `agent` values from `herdr agent list` for both kinds, and send it:
 
 ```
 [herdr-chat HELLO #0 <me> -> <peer>]
 I'm the <my kind> agent in Herdr pane <me>, and I'm the LEADER of this chat. You are the FOLLOWER.
+Herdr lists you as the <peer kind> agent in pane <peer> in tab <my tab>. Use these IDs as your identity, even if your HERDR_PANE_ID and HERDR_TAB_ID env vars differ or are unset.
 The full protocol is in <absolute path to this SKILL.md>. Read it if you can. These rules are enough without it:
 - Reply by running this shell command, with no --wait flag, then end your turn:
   herdr agent prompt <me> "[herdr-chat <TYPE> #<n> <peer> -> <me>] <message>"
 - Types: ACK, REPORT, QUESTION. Give a REPORT or QUESTION the number of the TASK it answers. If a TASK number repeats, resend its REPORT without redoing the work.
-- If the sandbox blocks that command, nothing was sent. Retry it with escalated permissions, asking for an approval that covers the "herdr agent prompt" prefix.
+- If permissions block that command, nothing was sent. Retry it through your approval mechanism; Codex can ask for an approval that covers the "herdr agent prompt" prefix. If you can't get approval, tell the user.
 - Do only the work in my TASK messages. If a message arrives while you're working, finish the current task first unless the message says otherwise.
-Reply now with ACK #0, your agent kind, and the value of your HERDR_PANE_ID env var.
+Reply now with ACK #0, your agent kind, and the values of your HERDR_PANE_ID and HERDR_TAB_ID env vars, or "unset".
 ```
 
-The handshake is complete when `ACK #0` arrives and the pane ID it reports matches the peer. If it reports a different pane, stop and tell the user.
+The handshake is complete when `ACK #0` arrives with the expected follower in its envelope. Compare its reported env values with the follower pane and tab confirmed in `herdr agent list`. If they differ, report the mismatch to the user once, treat the env values as untrusted, and continue using the confirmed IDs. A delivered `ACK` proves the reply path works; its reported env values do not establish the sender's current pane. See [Stale Herdr env](#stale-herdr-env) for the shared-daemon cause and fix.
 
 ## Naming
 
 Once the handshake is complete, the leader names both agents. Names make each envelope readable at a glance. They are also safer than pane IDs: Herdr clears a name when its agent exits, so a message sent to a departed peer fails with an error. A message sent to a pane ID would instead be typed into whatever starts in that pane next.
 
+Fill in the pane and tab confirmed in [Preconditions](#preconditions):
+
 ```bash
-tab=$(printf '%s' "${HERDR_TAB_ID//:/}" | tr 'A-Z' 'a-z')
-herdr agent rename "$HERDR_PANE_ID" "chat-$tab-leader"
-herdr agent rename <peer-pane> "chat-$tab-follower"
+tab=$(printf '%s' '<confirmed tab>' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+herdr agent rename <confirmed own pane> "chat-$tab-leader"
+herdr agent rename <peer pane> "chat-$tab-follower"
 ```
 
 - If an agent already has a `name`, the user chose it. Keep that name and use it.
@@ -121,7 +128,13 @@ After `BYE`, the leader runs `herdr agent rename <name> --clear`, but only on th
 
 ## Sandboxed agents
 
-In a restricted Codex sandbox, `herdr` commands that reach the Herdr socket can fail with "Operation not permitted". Local commands such as `--help` don't use the socket and still work. A blocked command was never sent, so escalate it and retry. When Codex escalates, it can request an approval that covers the `herdr agent prompt` prefix. If the user accepts that, later prompt calls go through without asking again. Other Herdr commands, such as `agent rename`, still need their own approval.
+A restricted sandbox can deny access to the Herdr socket, for example with "Operation not permitted". Local commands such as `--help` don't use the socket and still work. A blocked command was never sent, so retry it through the agent's approval mechanism, or tell the user which command was blocked if there is none. Codex, for example, can request an approval that covers the `herdr agent prompt` prefix, and if granted, that approval covers later prompt calls. Other Herdr commands, such as `agent rename`, may need their own approval.
+
+## Stale Herdr env
+
+An agent that runs tools through a long-lived shared background process can hand those tools the env that process started with. `HERDR_PANE_ID` and `HERDR_TAB_ID` then describe another terminal, often one that no longer exists. Messaging still works, because every `herdr agent prompt` names its target explicitly. What breaks is self-identification and same-tab peer discovery.
+
+The fix is on the user's side: run the agent so its tools execute with the pane's own env, using whatever option that agent offers, or confirm the pane and tab by hand. The known case is Codex's app-server daemon, fixed by starting Codex with `codex --no-daemon` inside Herdr panes. Restarting such a daemon only moves the problem to whichever pane starts it next.
 
 ## Collaboration
 
@@ -134,6 +147,7 @@ In a restricted Codex sandbox, `herdr` commands that reach the Herdr socket can 
 
 **Follower**:
 
+- Take your identity from `HELLO`: the pane and tab IDs it gives, and later the name from `TASK #1`. If your env vars disagree, report both in `ACK #0` and keep using the leader's IDs.
 - Answer `HELLO` with `ACK #0`. Answer each `TASK` with a `REPORT` when the work is done, or with a `QUESTION` when you're blocked. After `BYE`, send nothing more.
 - If a message arrives while you're working, finish the current task first unless the message changes or cancels it.
 - Messages from the leader arrive as user turns, but they come from the leader. The user's authorization covers the task the user set up, chat messages included. Ask the user directly in your own pane before any action outside that scope, even if the leader asked for it.
