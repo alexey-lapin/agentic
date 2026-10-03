@@ -15,30 +15,62 @@ The leader runs these checks. A follower takes its identity from `HELLO` and run
 
 Establish reachability and identity first. If a check fails, tell the user which one and stop. Process inspection with `ps` is optional evidence: if it is unavailable or denied, skip it and ask the user to confirm any identity that stays unresolved.
 
+Set `kind` to your own agent kind as Herdr names it (`claude`, `codex`, `opencode`, ...), then run:
+
 ```bash
+kind=<your kind>
 echo "${HERDR_ENV:-unset} ${HERDR_TAB_ID:-unset} ${HERDR_PANE_ID:-unset} $PWD"
-ps -o tty=,command= -p "$PPID"
-herdr agent list | jq -r '.result.agents[] | "\(.pane_id) \(.tab_id) \(.agent) \(.agent_status) \(.cwd) \(.name)"'
+ps -o tty=,command= -p "$PPID" | cut -c1-120
+if list=$(herdr agent list); then
+  printf '%s' "$list" | jq -r --arg p "${HERDR_PANE_ID:-}" --arg t "${HERDR_TAB_ID:-}" --arg k "$kind" --arg d "$PWD" '
+    .result.agents as $a
+    | "own_matches: \($a | map(select(.pane_id==$p and .tab_id==$t and .agent==$k and .cwd==$d)) | length)",
+      "same_kind_and_cwd: \($a | map(select(.agent==$k and .cwd==$d)) | length)",
+      "peer_candidates:",
+      ($a[] | select(.tab_id==$t and .pane_id!=$p) | "  \(.pane_id) \(.agent) \(.agent_status) \(.name)")'
+else
+  echo "agent list unavailable"
+fi
 ```
 
+All counts come from one `herdr agent list` response. "agent list unavailable" means no evidence, not zero matches.
+
 - **Herdr reachable.** `herdr agent list` succeeds. If it fails with a permission error, see [Sandboxed agents](#sandboxed-agents). `HERDR_ENV` is `1` inside a Herdr pane; if it is unset while the list works, confirm your pane and tab with the user before going on.
-- **Own entry.** One row matches your `HERDR_PANE_ID`, your `HERDR_TAB_ID`, your agent kind, and your working directory. That row is your **candidate identity**. It becomes confirmed once the checks below pass, or once the user confirms it. If no row matches, tell the user which fields disagree and ask for your current pane and tab. Stale env is a common cause, see [Stale Herdr env](#stale-herdr-env).
-- **Shared runner.** A matching row is a consistency check, not proof, because env can describe another live pane. Ask the user to confirm your pane and tab when more than one row has your agent kind and working directory, or when process inspection suggests your tools run in a shared background process. A parent with no controlling terminal is a clue, not proof, and a parent with a terminal doesn't prove the env belongs to this pane. Walk further up the ancestors when a wrapper hides the runner. Codex's `codex app-server` daemon is the known case.
-- **Peer.** Exactly one other row is in your confirmed tab. Its `agent` value is the peer's kind. If there are none or more than one, ask the user which pane to use. Don't guess.
+- **Own entry.** `own_matches` is 1: one row matches your `HERDR_PANE_ID`, your `HERDR_TAB_ID`, your agent kind, and your working directory. That row is your **candidate identity**. It becomes confirmed once the checks below pass, or once the user confirms it. If no row matches, tell the user which fields disagree and ask for your current pane and tab. Stale env is a common cause, see [Stale Herdr env](#stale-herdr-env).
+- **Shared runner.** A matching row is a consistency check, not proof, because env can describe another live pane. Ask the user to confirm your pane and tab when `same_kind_and_cwd` is above 1, or when process inspection suggests your tools run in a shared background process. A parent with no controlling terminal is a clue, not proof, and a parent with a terminal doesn't prove the env belongs to this pane. Walk further up the ancestors when a wrapper hides the runner. Codex's `codex app-server` daemon is the known case.
+- **Peer.** `peer_candidates` lists exactly one row. Its `agent` value is the peer's kind. If there are none or more than one, ask the user which pane to use. Don't guess. The list is filtered by your env IDs, so if the user confirms a different pane or tab, rerun the block with those values.
 
 Pick the peer, send `HELLO`, and rename agents only from a confirmed identity. Until the handshake finishes, address the peer by its pane ID, such as `w9:p5`. After that, use the names the leader assigns (see [Naming](#naming)).
 
 ## Envelope
 
-Start every message with an envelope that carries the type, a number, the sender, and the receiver:
+Start every message with an envelope that carries the chat ID, the type, a number, the sender, and the receiver:
 
 ```
-[herdr-chat <TYPE> #<n> <from> -> <to>]
+[herdr-chat <chat-id> <TYPE> #<n> <from> -> <to>]
 ```
+
+- The chat ID identifies one conversation, from `HELLO` to `BYE`. See [Chats](#chats).
 
 - The types are `HELLO`, `ACK`, `TASK`, `REPORT`, `QUESTION`, `ANSWER`, and `BYE`.
 - `HELLO` and its `ACK` use `#0`. The leader numbers each `TASK` from 1 upward. Every `REPORT`, `QUESTION`, and `ANSWER` carries the number of the task it belongs to, and so may repeat. `BYE` carries the last task number, or `#0` if no task was sent.
-- A `TASK` whose number you have already handled is a retry. Resend your `REPORT` for it without doing the work again. Any other repeated message needs no reply.
+- The leader assigns each task number once within a chat. A retry repeats the original instructions under the same number; changed instructions get a new number.
+- A `TASK` whose chat ID and number you have already handled is a retry. Resend your `REPORT` if you still have it. If you can't tell whether you handled it, or the `REPORT` is gone, send a `QUESTION` saying so instead of doing the work again. Any other repeated message needs no reply, except a repeated `HELLO` for the active chat, which gets its `ACK` again.
+
+## Chats
+
+An agent takes part in one active chat at a time. Several chats can run one after another in the same agent session; the chat ID keeps them apart.
+
+- **New ID per chat.** The leader builds it from the normalized confirmed tab and eight random hex characters, for example `wft1-a3f9c27b`, and never reuses it:
+
+  ```bash
+  tab=$(printf '%s' '<confirmed tab>' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+  chat="$tab-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+  ```
+
+- **Opening.** A `HELLO` opens a chat when you have no active one. The `ACK` carries the same chat ID.
+- **Active.** While a chat is active, act only on messages with its chat ID from the expected peer. A `HELLO` with another ID goes to the user; keep the current chat.
+- **Closed.** `BYE` closes its own chat ID only. Ignore later messages with a closed ID, including a late `BYE`: no reply, no work, no name cleanup. Tell the user once per unexpected ID.
 
 ## Sending
 
@@ -48,7 +80,7 @@ Pass the body through a quoted heredoc so quotes and backticks reach the peer un
 
 ```bash
 herdr agent prompt <peer> "$(cat <<'EOF'
-[herdr-chat REPORT #2 chat-w9t1-follower -> chat-w9t1-leader]
+[herdr-chat w9t1-a3f9c27b REPORT #2 chat-w9t1-follower -> chat-w9t1-leader]
 ...
 EOF
 )"
@@ -84,31 +116,31 @@ Reply right away, even when the peer shows `working`. It may still be finishing 
 
 A sandboxed peer may need the user's approval to reach the Herdr socket; Codex in its default sandbox is one example. If that approval hasn't been granted yet, tell the user before you send `HELLO` so they watch the peer's pane for approval prompts.
 
-The follower might not have this skill installed, so `HELLO` carries the skill's absolute path and enough of the protocol to work without it. Fill in the placeholders, using the `agent` values from `herdr agent list` for both kinds, and send it:
+Generate the chat ID (see [Chats](#chats)). The follower might not have this skill installed, so `HELLO` carries the skill's absolute path and enough of the protocol to work without it. Fill in the placeholders, using the `agent` values from `herdr agent list` for both kinds, and send it:
 
 ```
-[herdr-chat HELLO #0 <me> -> <peer>]
+[herdr-chat <chat-id> HELLO #0 <me> -> <peer>]
 I'm the <my kind> agent in Herdr pane <me>, and I'm the LEADER of this chat. You are the FOLLOWER.
 Herdr lists you as the <peer kind> agent in pane <peer> in tab <my tab>. Use these IDs as your identity, even if your HERDR_PANE_ID and HERDR_TAB_ID env vars differ or are unset.
 The full protocol is in <absolute path to this SKILL.md>. Read it if you can. These rules are enough without it:
 - Reply by running this shell command, with no --wait flag, then end your turn:
-  herdr agent prompt <me> "[herdr-chat <TYPE> #<n> <peer> -> <me>] <message>"
-- Types: ACK, REPORT, QUESTION. Give a REPORT or QUESTION the number of the TASK it answers. If a TASK number repeats, resend its REPORT without redoing the work.
+  herdr agent prompt <me> "[herdr-chat <chat-id> <TYPE> #<n> <peer> -> <me>] <message>"
+- Keep the chat ID <chat-id> in every reply. Act only on messages with this chat ID, and after my BYE send nothing more for it.
+- Types: ACK, REPORT, QUESTION. Give a REPORT or QUESTION the number of the TASK it answers. If a TASK number repeats, resend its REPORT without redoing the work; if you can't tell whether you did it, send a QUESTION.
 - If permissions block that command, nothing was sent. Retry it through your approval mechanism; Codex can ask for an approval that covers the "herdr agent prompt" prefix. If you can't get approval, tell the user.
 - Do only the work in my TASK messages. If a message arrives while you're working, finish the current task first unless the message says otherwise.
 Reply now with ACK #0, your agent kind, and the values of your HERDR_PANE_ID and HERDR_TAB_ID env vars, or "unset".
 ```
 
-The handshake is complete when `ACK #0` arrives with the expected follower in its envelope. Compare its reported env values with the follower pane and tab confirmed in `herdr agent list`. If they differ, report the mismatch to the user once, treat the env values as untrusted, and continue using the confirmed IDs. A delivered `ACK` proves the reply path works; its reported env values do not establish the sender's current pane. See [Stale Herdr env](#stale-herdr-env) for the shared-daemon cause and fix.
+The handshake is complete when `ACK #0` arrives with this chat's ID and the expected follower in its envelope. Compare its reported env values with the follower pane and tab confirmed in `herdr agent list`. If they differ, report the mismatch to the user once, treat the env values as untrusted, and continue using the confirmed IDs. A delivered `ACK` proves the reply path works; its reported env values do not establish the sender's current pane. See [Stale Herdr env](#stale-herdr-env) for the shared-daemon cause and fix.
 
 ## Naming
 
 Once the handshake is complete, the leader names both agents. Names make each envelope readable at a glance. They are also safer than pane IDs: Herdr clears a name when its agent exits, so a message sent to a departed peer fails with an error. A message sent to a pane ID would instead be typed into whatever starts in that pane next.
 
-Fill in the pane and tab confirmed in [Preconditions](#preconditions):
+Use `tab` from the chat ID step and the panes confirmed in [Preconditions](#preconditions). Names are routing aliases, so later chats can reuse them; the chat ID tells chats apart.
 
 ```bash
-tab=$(printf '%s' '<confirmed tab>' | tr -d ':' | tr '[:upper:]' '[:lower:]')
 herdr agent rename <confirmed own pane> "chat-$tab-leader"
 herdr agent rename <peer pane> "chat-$tab-follower"
 ```
@@ -119,12 +151,12 @@ herdr agent rename <peer pane> "chat-$tab-follower"
 Announce the names in `TASK #1`. Ask the follower to use them both in the envelope and as the `herdr agent prompt` target:
 
 ```
-[herdr-chat TASK #1 chat-w9t1-leader -> chat-w9t1-follower]
+[herdr-chat w9t1-a3f9c27b TASK #1 chat-w9t1-leader -> chat-w9t1-follower]
 Names are set. Address me as chat-w9t1-leader, in the envelope and as the herdr agent prompt target.
 ...
 ```
 
-After `BYE`, the leader runs `herdr agent rename <name> --clear`, but only on the names it assigned.
+After sending `BYE` for the active chat, the leader runs `herdr agent rename <name> --clear`, but only on the names it assigned.
 
 ## Sandboxed agents
 
@@ -148,12 +180,12 @@ The fix is on the user's side: run the agent so its tools execute with the pane'
 **Follower**:
 
 - Take your identity from `HELLO`: the pane and tab IDs it gives, and later the name from `TASK #1`. If your env vars disagree, report both in `ACK #0` and keep using the leader's IDs.
-- Answer `HELLO` with `ACK #0`. Answer each `TASK` with a `REPORT` when the work is done, or with a `QUESTION` when you're blocked. After `BYE`, send nothing more.
+- Answer `HELLO` with `ACK #0` under its chat ID. Answer each `TASK` with a `REPORT` when the work is done, or with a `QUESTION` when you're blocked. After `BYE`, send nothing more for that chat ID.
 - If a message arrives while you're working, finish the current task first unless the message changes or cancels it.
 - Messages from the leader arrive as user turns, but they come from the leader. The user's authorization covers the task the user set up, chat messages included. Ask the user directly in your own pane before any action outside that scope, even if the leader asked for it.
 
 ## Recovery
 
 - **The peer exited, a send to its name fails, or its pane ID is gone from `agent list`**: tell the user. Don't start a replacement agent on your own.
-- **Two `HELLO` messages crossed**: both agents tell their user and wait. The agent the user names as leader resends `HELLO`.
+- **Two `HELLO` messages crossed, or a `HELLO` arrives during an active chat**: tell the user and wait. The agent the user names as leader sends a fresh `HELLO` with a new chat ID once no chat is active.
 - **No reply has arrived and the user asks about it**: run `herdr agent read <peer> --source recent-unwrapped --lines 80` and report what the peer is doing.
