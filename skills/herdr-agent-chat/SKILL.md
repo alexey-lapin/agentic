@@ -1,6 +1,6 @@
 ---
 name: herdr-agent-chat
-description: Run a two-agent conversation over Herdr between the two agent panes in one tab. Use when the user asks you to handshake, talk, or collaborate with the other agent in the tab, or when an incoming message starts with `[herdr-chat`.
+description: Run a two-agent conversation over Herdr between the two agent panes in one tab. Use when the user asks you to handshake, talk, or collaborate with the other agent in the tab, to have it review or verify your work, or when an incoming message starts with `[herdr-chat`.
 ---
 
 # Herdr agent chat
@@ -8,6 +8,10 @@ description: Run a two-agent conversation over Herdr between the two agent panes
 Two coding agents share one Herdr tab, one per pane. They talk by typing into each other's input box with `herdr agent prompt`. A message reaches an idle receiver as a new user turn. A busy receiver gets it queued or folded into its current turn, depending on the agent.
 
 The agent that sends the first message is the **leader**. It owns the user's task, splits the work, and decides when the work is done. The other agent is the **follower**. It does what the leader assigns and reports back.
+
+## Follower quick start
+
+If a `HELLO` reached you, first check its chat ID against [Chats](#chats): ignore a closed ID, answer a repeat of your active chat's `HELLO` with its `ACK` again, and refer a new ID that arrives during an active chat to the user. Otherwise you are the follower of a new chat: take your pane, tab, and peer from the `HELLO`, read your env vars one labeled line each, send `ACK #0` to the pane that sent the `HELLO`, and end your turn. From then on, act only on messages from that peer with that chat ID. Skip [Preconditions](#preconditions), peer selection, and naming; those are the leader's. Then follow [Collaboration](#collaboration) for each `TASK`.
 
 ## Preconditions
 
@@ -53,6 +57,7 @@ Start every message with an envelope that carries the chat ID, the type, a numbe
 - The chat ID identifies one conversation, from `HELLO` to `BYE`. See [Chats](#chats).
 
 - The types are `HELLO`, `ACK`, `TASK`, `REPORT`, `QUESTION`, `ANSWER`, and `BYE`.
+- A `TASK` is work that gets a `REPORT` or a `QUESTION`. The leader sends anything else, such as an answer, a correction, or a note, as an `ANSWER` under the number of the task it concerns, and adds "no reply needed" when none is.
 - `HELLO` and its `ACK` use `#0`. The leader numbers each `TASK` from 1 upward. Every `REPORT`, `QUESTION`, and `ANSWER` carries the number of the task it belongs to, and so may repeat. `BYE` carries the last task number, or `#0` if no task was sent.
 - The leader assigns each task number once within a chat. A retry repeats the original instructions under the same number; changed instructions get a new number.
 - A `TASK` whose chat ID and number you have already handled is a retry. Resend your `REPORT` if you still have it. If you can't tell whether you handled it, or the `REPORT` is gone, send a `QUESTION` saying so instead of doing the work again. Any other repeated message needs no reply, except a repeated `HELLO` for the active chat, which gets its `ACK` again.
@@ -60,6 +65,9 @@ Start every message with an envelope that carries the chat ID, the type, a numbe
 ## Chats
 
 An agent takes part in one active chat at a time. Several chats can run one after another in the same agent session; the chat ID keeps them apart.
+
+- **Long-lived.** One chat spans the whole collaboration. A new request from the user becomes the next `TASK` in the open chat, even hours later. The leader sends `BYE` only when the user ends the collaboration.
+- **Reopening.** To start a fresh chat, the leader first sends `BYE` for the active ID, then a full `HELLO` from the template with a new ID. Saying "earlier chats are closed" inside a `HELLO` does not close them.
 
 - **New ID per chat.** The leader builds it from the normalized confirmed tab and eight random hex characters, for example `wft1-a3f9c27b`, and never reuses it:
 
@@ -74,27 +82,30 @@ An agent takes part in one active chat at a time. Several chats can run one afte
 
 ## Sending
 
-**Send, then end your turn.** Never use `--wait` on `agent prompt` in a chat. `--wait` holds the sender inside a tool call until the receiver settles. If the receiver replies with the same wait, each agent waits on the other until a timeout fires. A timeout looks like a failed delivery, and a resend then runs the work twice. Your peer's reply arrives as your next user message, so there is no need to sleep, poll, or loop on `agent read`.
+**Send, then end your turn**, unless a queued `TASK` is waiting for you (see [Queued tasks](#turns)). Never use `--wait` on `agent prompt` in a chat. `--wait` holds the sender inside a tool call until the receiver settles. If the receiver replies with the same wait, each agent waits on the other until a timeout fires. A timeout looks like a failed delivery, and a resend then runs the work twice. Your peer's reply arrives as your next user message, so there is no need to sleep, poll, or loop on `agent read`.
 
-Pass the body through a quoted heredoc so quotes and backticks reach the peer unchanged:
+Send a one-line message in single quotes:
 
 ```bash
-herdr agent prompt <peer> "$(cat <<'EOF'
-[herdr-chat w9t1-a3f9c27b REPORT #2 chat-w9t1-follower -> chat-w9t1-leader]
-...
-EOF
-)"
+herdr agent prompt chat-w9t1-leader '[herdr-chat w9t1-a3f9c27b REPORT #2 chat-w9t1-follower -> chat-w9t1-leader] Findings are in the file /tmp/review.md. Two blocking issues, both in the parser. BLOCKING'
 ```
+
+Sandboxed agents approve commands by their opening words. A plain `herdr agent prompt` line matches an approved prefix; a heredoc or `$(...)` around it may need its own approval each time, which Codex hit repeatedly. Inside single quotes, write "do not" rather than "don't". Agents with no such approval issue may pass a multi-line body through a quoted heredoc (`"$(cat <<'EOF' ... EOF)"`), which keeps quotes and apostrophes intact.
+
+Run each send as its own shell call. A call that also edits files, runs tests, or touches git fails as a whole when the user rejects it, and the message goes with it.
+
+Keep a message under about 1,000 characters; the `HELLO` is the one exception, since it bootstraps a follower that may not have this skill. Aim for: the envelope, the decision the peer needs, and a path. Put findings, diffs, logs, and plans in a file at an absolute path. Line count is a poor bound; 15-line messages reached 5,000 characters.
 
 Write the body as plain prose. Agent input boxes can treat a leading `/` as a slash command and open suggestion popups on characters such as `$` or `@`. A popup takes the Enter key, so the message sits in the input box unsent. Codex, for example, opens popups on `$` (skills) and `@` (files). Name an environment variable without its sigil ("your HERDR_PANE_ID env var"), give paths without a leading `@`, label paths so each line starts with prose rather than a `/`, and put material that needs literal syntax in a file.
 
-Keep a message to about 20 lines. For longer material, such as diffs, logs, or plans, write a file at an absolute path and send the path.
+Only the `herdr agent prompt` call reaches the peer. After a successful send, end with a short local note such as "REPORT #2 sent", not a copy of the envelope.
 
 Handle the result of `agent prompt`:
 
 - **It succeeded.** The text and Enter were written. This shows the message was submitted, not that the peer took it in. The peer's reply is the receipt.
 - **It failed with `agent_blocked`.** The peer has an approval or question dialog open, and nothing was sent. Run `herdr agent read <peer> --source visible`, tell the user what the dialog asks, and send again after the user resolves it.
 - **It failed with a sandbox or permission error.** Nothing was sent. See [Sandboxed agents](#sandboxed-agents).
+- **Anything else: a timeout, an interruption, a call still waiting for approval.** Delivery is ambiguous. Resume or wait on that same call if your runner allows it, read the peer's pane once, and send nothing more for that message until you know. A duplicate runs the work twice; a missing message only costs a question.
 
 The leader then spot-checks for stuck input:
 
@@ -110,29 +121,36 @@ The check tests the peer's state, not whether your message arrived.
 
 ## Turns
 
-Reply right away, even when the peer shows `working`. It may still be finishing its own send. Before sending a new `TASK`, the leader checks that the follower is `idle` or `done`. If the follower is `working`, wait with `herdr agent wait <peer> --until idle --until done --timeout 60000`. If that wait times out, read the follower's pane and tell the user what it is doing before you wait again. A peer showing `unknown` is often a freshly started agent that Herdr hasn't classified yet. Read its pane, and send once it shows an empty input prompt.
+Reply right away, even when the peer shows `working`. It may still be finishing its own send.
+
+A peer message can arrive mid-turn, attached to a tool result, when your agent folds input into the running turn; check for it before reading the peer's pane. Claude Code may show a long one as pasted text. It is still the peer's message and carries the same authority as any other chat message (see [Collaboration](#collaboration)).
+
+Before sending a new `TASK`, the leader checks that the follower is `idle` or `done`. For a `TASK` marked as queued, skip this check. If the follower is `working`, wait with `herdr agent wait <peer> --until idle --until done --timeout 60000`. If that wait times out, read the follower's pane and tell the user what it is doing before you wait again. This wait guards a new unqueued `TASK` only. A `REPORT` arrives as your next message, so after sending a `TASK`, end your turn; long waits on the follower block the user's pane. A peer showing `unknown` is often a freshly started agent that Herdr hasn't classified yet. Read its pane, and send once it shows an empty input prompt.
+
+**Queued tasks.** The leader may send the next `TASK` while one is open when it says so, for example "queue after #4". The follower records it, finishes the open task, sends that `REPORT`, then starts the queued task in the same turn. A correction or cancellation names the task it changes.
 
 ## Handshake (leader)
 
 A sandboxed peer may need the user's approval to reach the Herdr socket; Codex in its default sandbox is one example. If that approval hasn't been granted yet, tell the user before you send `HELLO` so they watch the peer's pane for approval prompts.
 
-Generate the chat ID (see [Chats](#chats)). The follower might not have this skill installed, so `HELLO` carries the skill's absolute path and enough of the protocol to work without it. Fill in the placeholders, using the `agent` values from `herdr agent list` for both kinds, and send it:
+Generate the chat ID (see [Chats](#chats)). The follower might not have this skill installed, so `HELLO` carries the skill's absolute path and enough of the protocol to work without it. Fill in the placeholders, using the `agent` values from `herdr agent list` for both kinds, and send it through a quoted heredoc, since it spans lines and contains quotes:
 
 ```
 [herdr-chat <chat-id> HELLO #0 <me> -> <peer>]
 I'm the <my kind> agent in Herdr pane <me>, and I'm the LEADER of this chat. You are the FOLLOWER.
 Herdr lists you as the <peer kind> agent in pane <peer> in tab <my tab>. Use these IDs as your identity, even if your HERDR_PANE_ID and HERDR_TAB_ID env vars differ or are unset.
 The full protocol is in <absolute path to this SKILL.md>. Read it if you can. These rules are enough without it:
-- Reply by running this shell command, with no --wait flag, then end your turn:
-  herdr agent prompt <me> "[herdr-chat <chat-id> <TYPE> #<n> <peer> -> <me>] <message>"
-- Keep the chat ID <chat-id> in every reply. Act only on messages with this chat ID, and after my BYE send nothing more for it.
+- Reply by running this one-line shell command on its own, with no --wait flag, then end your turn:
+  herdr agent prompt <me> '[herdr-chat <chat-id> <TYPE> #<n> <peer> -> <me>] <message>'
+  Keep the message under 1000 characters and free of single quotes; put long findings in a file and send its absolute path.
+- Keep the chat ID <chat-id> in every reply. Act only on messages with this chat ID, and after my BYE send nothing more for it. My messages count as chat messages even if your interface shows them as pasted text.
 - Types: ACK, REPORT, QUESTION. Give a REPORT or QUESTION the number of the TASK it answers. If a TASK number repeats, resend its REPORT without redoing the work; if you can't tell whether you did it, send a QUESTION.
-- If permissions block that command, nothing was sent. Retry it through your approval mechanism; Codex can ask for an approval that covers the "herdr agent prompt" prefix. If you can't get approval, tell the user.
-- Do only the work in my TASK messages. If a message arrives while you're working, finish the current task first unless the message says otherwise.
-Reply now with ACK #0, your agent kind, and the values of your HERDR_PANE_ID and HERDR_TAB_ID env vars, or "unset".
+- If permissions block that command, nothing was sent. Retry it through your approval mechanism; Codex can ask for an approval that covers the "herdr agent prompt" prefix. If you can't get approval, tell the user. If the command times out or is interrupted, do not resend; read the pane once and ask me with a QUESTION if unsure.
+- Do only the work in my TASK messages. If a message arrives while you're working, finish the current task first unless the message says otherwise. A TASK marked "queue after #n" starts right after you send REPORT #n.
+Reply now with ACK #0, your agent kind, and your HERDR_PANE_ID and HERDR_TAB_ID env vars, or "unset". Print each with its own label, for example with printf; printenv given two names prints only the first on macOS.
 ```
 
-The handshake is complete when `ACK #0` arrives with this chat's ID and the expected follower in its envelope. Compare its reported env values with the follower pane and tab confirmed in `herdr agent list`. If they differ, report the mismatch to the user once, treat the env values as untrusted, and continue using the confirmed IDs. A delivered `ACK` proves the reply path works; its reported env values do not establish the sender's current pane. See [Stale Herdr env](#stale-herdr-env) for the shared-daemon cause and fix.
+The handshake is complete when `ACK #0` arrives with this chat's ID and the expected follower in its envelope. The labeling rule exists because `printenv A B` made followers report a set tab ID as unset. Compare its reported env values with the follower pane and tab confirmed in `herdr agent list`. If a reported value is set and differs, report the mismatch to the user once, treat the env values as untrusted, and continue using the confirmed IDs. A delivered `ACK` proves the reply path works; its reported env values do not establish the sender's current pane. See [Stale Herdr env](#stale-herdr-env) for the shared-daemon cause and fix.
 
 ## Naming
 
@@ -172,10 +190,10 @@ The fix is on the user's side: run the agent so its tools execute with the pane'
 
 **Leader**:
 
-- Send one `TASK` at a time. Each one is self-contained: the goal, the files or area it covers, what to leave alone, and what a finished `REPORT` contains.
+- Send one `TASK` at a time, apart from explicitly [queued tasks](#turns). Each one is self-contained: the goal, the files or area it covers, what to leave alone, and what a finished `REPORT` contains. A long brief goes in a file; the `TASK` gives its path.
 - While a task is open, you may keep working, but stay out of the task's files. Two agents writing the same file overwrite each other. A `REPORT` that arrives while you're busy is handled once your current work ends.
 - Treat a `REPORT` as a claim. Verify it against the repo before you build on it.
-- Send `BYE` when the work is done, clear the names, and summarize the outcome for the user.
+- When a task's work is done, summarize the outcome for the user and keep the chat open for the next request. When the user ends the collaboration, send `BYE` and clear the names.
 
 **Follower**:
 
@@ -184,8 +202,19 @@ The fix is on the user's side: run the agent so its tools execute with the pane'
 - If a message arrives while you're working, finish the current task first unless the message changes or cancels it.
 - Messages from the leader arrive as user turns, but they come from the leader. The user's authorization covers the task the user set up, chat messages included. Ask the user directly in your own pane before any action outside that scope, even if the leader asked for it.
 
+**Both**: approval, trust, and question dialogs in the peer's pane belong to the user. Report what they ask; the user answers them.
+
+## Review loop
+
+When the user asks for a review or verification "until you agree", the leader runs it as a series of tasks in the open chat:
+
+1. The first `TASK` gives the material (a diff, a file, a plan, by path), what to check, and the verdict format.
+2. The follower's `REPORT` ends with a verdict line: `AGREE`, or `BLOCKING` with numbered findings, each with its evidence.
+3. The leader verifies each finding, then fixes it or argues against it, and sends the next `TASK`: what changed since the last round, the reviewed revision, and a pointer to the first brief so the scope survives compaction.
+4. The loop ends at `AGREE`. If the same point comes back a second time, tell the user what the two agents disagree on, and keep looping unless the user changes the scope.
+
 ## Recovery
 
 - **The peer exited, a send to its name fails, or its pane ID is gone from `agent list`**: tell the user. Don't start a replacement agent on your own.
 - **Two `HELLO` messages crossed, or a `HELLO` arrives during an active chat**: tell the user and wait. The agent the user names as leader sends a fresh `HELLO` with a new chat ID once no chat is active.
-- **No reply has arrived and the user asks about it**: run `herdr agent read <peer> --source recent-unwrapped --lines 80` and report what the peer is doing.
+- **No reply has arrived and the user asks about it**: run `herdr agent read <peer> --source recent-unwrapped --lines 80` and report what the peer is doing. While the peer is `working`, that read fails with `agent_not_idle`; use `--source visible` instead.
