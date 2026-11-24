@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# Helper for the rex-agent-chat skill. One entry point keeps the command
+# prefix stable, so a sandboxed agent can approve it once.
+#
+#   rex-chat whoami [KIND]           check your own pane and list peer candidates
+#   rex-chat status TARGET           print the peer's agent kind and state
+#   rex-chat send TARGET [MESSAGE]   paste MESSAGE (or stdin) into the peer and press Enter
+#   rex-chat wait TARGET SECONDS STATE...   wait until the peer reports one of STATEs
+#   rex-chat read TARGET [LINES]     print the last LINES (default 80) of the peer's screen
+#
+# TARGET is BLOCK@PID, as whoami prints it: the block plus the process ID of
+# the agent running in it. send checks that process right before the paste and
+# again before Enter, which catches an agent restarted in that block. A bare
+# BLOCK skips the process check.
+#
+# Exit codes: 0 ok; 1 Rex, permission, or usage error (nothing sent); 2 peer blocked
+# (nothing sent); 3 block gone or not running a known agent; 4 wait timed out;
+# 5 delivery ambiguous (the text may be in the peer's input box, unsubmitted).
+#
+# Known agents are matched by program name. Add others with the
+# REX_CHAT_AGENTS env var, space separated.
+set -uo pipefail
+
+die() { echo "rex-chat: $1" >&2; exit "${2:-1}"; }
+command -v rex >/dev/null || die "rex not found"
+command -v jq >/dev/null || die "jq not found"
+
+agents=" claude codex opencode gemini aider amp goose crush cursor-agent qwen copilot ${REX_CHAT_AGENTS:-} "
+
+# Run rex, keep its output. A missing block returns 3; any other failure,
+# such as a socket permission error, prints Rex's message and returns 1.
+rexc() {
+  local out err rc
+  err=$(mktemp) || return 1
+  out=$(rex "$@" 2>"$err"); rc=$?
+  if [ $rc -ne 0 ]; then
+    if grep -q '^Error: block target ".*" not found$' "$err"; then rc=3; else cat "$err" >&2; rc=1; fi
+    rm -f "$err"; return $rc
+  fi
+  rm -f "$err"; printf '%s' "$out"
+}
+
+fg_field() { printf '%s' "$1" | jq -r ".foreground.$2 // empty"; }
+
+kind_of() {
+  printf '%s' "$1" | jq -r '.foreground | (.argv0 // .name // "") | sub("^-"; "") | split("/") | last | if . == "" then "none" else . end'
+}
+
+is_agent() { case $agents in *" $1 "*) return 0 ;; esac; return 1; }
+
+# Agent state from OSC 7501 records owned by the current foreground process.
+# Records with no owner, or an older owner, are stale. Unrecognized states
+# count as unknown. Fails when the status query itself fails.
+state_of() {
+  local block=$1 p=$2 st
+  st=$(rexc block call -b "$block" program_status) || return $?
+  printf '%s' "$st" | jq -r --argjson pid "$(fg_field "$p" pid)" --arg name "$(fg_field "$p" name)" '
+    [.records[] | select(.owner != null and .owner.pid == $pid and .owner.name == $name)]
+    | sort_by(.updated_at) | last
+    | if . != null and (.state | IN("idle","working","done","blocked","error")) then .state
+      else "unknown" end'
+}
+
+# Prints "KIND STATE" for a target whose block runs a known agent, and the
+# expected process when the target names one.
+check_peer() {
+  local block=${1%@*} want= p k s rc
+  case $1 in *@*) want=${1##*@}
+    [[ $want =~ ^[0-9]+$ ]] || die "bad target $1: expected BLOCK@PID with a numeric PID" ;;
+  esac
+  p=$(rexc block call -b "$block" process); rc=$?
+  [ $rc -eq 3 ] && die "peer_gone: block $block does not exist" 3
+  [ $rc -ne 0 ] && die "cannot query block $block; nothing was sent"
+  k=$(kind_of "$p")
+  is_agent "$k" || die "peer_gone: $block runs $k, not a known agent (see REX_CHAT_AGENTS)" 3
+  [ -z "$want" ] || [ "$(fg_field "$p" pid)" = "$want" ] ||
+    die "peer_gone: $block now runs $k as process $(fg_field "$p" pid), not the agent $want from the handshake" 3
+  s=$(state_of "$block" "$p") || die "cannot read status of $block; nothing was sent"
+  echo "$k $s"
+}
+
+cmd_whoami() {
+  [ $# -le 1 ] || die "usage: rex-chat whoami [KIND]"
+  local kind=${1:-} me sess win block p fg_pid anc ok=no
+  me=$(rexc whoami --json) || die "rex whoami failed"
+  sess=$(printf '%s' "$me" | jq -r '.session_id // empty')
+  win=$(printf '%s' "$me" | jq -r '.window_id // empty')
+  block=$(printf '%s' "$me" | jq -r '.block_id // empty')
+  echo "env: REX_SESSION=${REX_SESSION:-unset} REX_BLOCK=${REX_BLOCK:-unset} cwd=$PWD"
+  [ -n "$block" ] || die "rex whoami reports no live block for this process; REX_BLOCK is unset or stale"
+  p=$(rexc block call -b "$block" process) || die "cannot read process of $block"
+  fg_pid=$(fg_field "$p" pid)
+  # Proof of identity: the pane's foreground process is one of our ancestors.
+  anc=$$
+  while [ -n "$anc" ] && [ "$anc" -gt 1 ] 2>/dev/null; do
+    [ "$anc" = "$fg_pid" ] && { ok=yes; break; }
+    anc=$(ps -o ppid= -p "$anc" 2>/dev/null | tr -d ' ')
+  done
+  echo "own_block: $block"
+  echo "own_target: $block${fg_pid:+@$fg_pid}"
+  echo "own_window: $win"
+  echo "own_session: $sess"
+  echo "own_kind: $(kind_of "$p")${kind:+ (expected $kind)}"
+  echo "own_cwd: $(fg_field "$p" cwd)"
+  echo "own_ancestor_check: $ok"
+  echo "peer_candidates:"
+  local blocks
+  blocks=$(rexc block ls -s "$sess" -w "$win" --json --short=false) || die "cannot list blocks in $win"
+  printf '%s' "$blocks" | jq -r '.blocks[] | select(.flavor | test("terminal")) | "\(.block_id)\t\(.label // "")"' |
+    while IFS=$'\t' read -r id label; do
+      [ "$id" = "$block" ] && continue
+      pp=$(rexc block call -b "$id" process) || { echo "  $id kind=error (cannot query)"; continue; }
+      k=$(kind_of "$pp")
+      is_agent "$k" || continue
+      s=$(state_of "$id" "$pp") || s=error
+      pid=$(fg_field "$pp" pid)
+      echo "  $id${pid:+@$pid} kind=$k state=$s label=${label:-none} cwd=$(fg_field "$pp" cwd)"
+    done
+}
+
+cmd_status() {
+  [ $# -eq 1 ] || die "usage: rex-chat status TARGET"
+  local r; r=$(check_peer "$1") || exit $?
+  echo "kind=${r% *} state=${r#* }"
+}
+
+cmd_send() {
+  [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: rex-chat send TARGET [MESSAGE]  (quote the message as one argument)"
+  local target=$1 block=${1%@*} msg r sess
+  # Command substitution drops trailing newlines; a message never needs them.
+  if [ $# -eq 2 ]; then msg=$2; else msg=$(cat); fi
+  [ -n "$msg" ] || die "empty message"
+  r=$(check_peer "$target") || exit $?
+  [ "${r#* }" = blocked ] && die "agent_blocked: $block has an approval or question open; nothing was sent" 2
+  sess=$(rexc block inspect "$block" --json | jq -er '.session_id') || die "cannot find the session of $block; nothing was sent"
+  rexc api call -s "$sess" block.event \
+    "$(jq -nc --arg b "$block" --arg t "$msg" '{block_id:$b, event:{type:"paste", payload:{text:$t}}}')" >/dev/null ||
+    die "ambiguous: the paste request failed, but the text may be in the input box; read the pane before resending" 5
+  sleep 0.3
+  r=$(check_peer "$target" 2>&1) || {
+    r=${r//; nothing was sent/}
+    die "ambiguous: pasted, then the check before Enter failed (${r//$'\n'/ }); Enter withheld, the text may sit in the input box. Read the pane and tell the user" 5
+  }
+  [ "${r#* }" = blocked ] &&
+    die "ambiguous: pasted, then the peer opened an approval or question dialog; Enter withheld so it cannot answer the dialog. Read the pane and tell the user" 5
+  rexc send-key -s "$sess" -b "$block" enter ||
+    die "ambiguous: pasted but Enter failed; read the pane before resending" 5
+  echo "sent to $block"
+}
+
+cmd_wait() {
+  [ $# -ge 3 ] || die "usage: rex-chat wait TARGET SECONDS STATE..."
+  local block=$1 secs=$2 r st end
+  shift 2
+  end=$(( $(date +%s) + secs ))
+  while :; do
+    r=$(check_peer "$block") || exit $?
+    st=${r#* }
+    for want in "$@"; do [ "$st" = "$want" ] && { echo "$st"; return 0; }; done
+    [ "$(date +%s)" -ge "$end" ] && { echo "timeout (state=$st)"; exit 4; }
+    sleep 1
+  done
+}
+
+cmd_read() {
+  [ $# -ge 1 ] && [ $# -le 2 ] || die "usage: rex-chat read TARGET [LINES]"
+  local block=${1%@*} out rc
+  out=$(rexc capture -b "$block" --trim --unwrap); rc=$?
+  [ $rc -eq 3 ] && die "peer_gone: block $block does not exist" 3
+  [ $rc -ne 0 ] && die "cannot read block $block"
+  printf '%s\n' "$out" | tail -n "${2:-80}"
+}
+
+sub=${1:-}; shift || true
+case $sub in
+  whoami) cmd_whoami "$@" ;;
+  status) cmd_status "$@" ;;
+  send) cmd_send "$@" ;;
+  wait) cmd_wait "$@" ;;
+  read) cmd_read "$@" ;;
+  *) sed -n '2,21p' "$0" >&2; exit 1 ;;
+esac
